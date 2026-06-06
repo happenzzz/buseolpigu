@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <meta name="theme-color" content="#080d1d" />
-<title>피구 작전판 - 이름 말판</title>
+<title>피구 작전판 - 이름 말판 멀티드래그</title>
 <style>
   :root {
     --bg: #080d1d;
@@ -508,9 +508,22 @@
 
   let state = loadState();
   let toastTimer = null;
-  let drag = null;
+  const activeDrags = new Map();
+  const MAX_SIMULTANEOUS_DRAGS = 3;
+  let dragListenersAttached = false;
+  let lastDragEndAt = 0;
 
   function getEnemyKey(number) { return `enemy-${number}`; }
+
+  function getDragIdentity(team, key) { return `${team}:${key}`; }
+
+  function isPieceBeingDragged(team, key) {
+    const identity = getDragIdentity(team, key);
+    for (const item of activeDrags.values()) {
+      if (item.identity === identity) return true;
+    }
+    return false;
+  }
 
   function buildPositionState(selected, ownMap, enemyMap) {
     const ownPositions = {};
@@ -682,8 +695,10 @@
     state.selected.forEach((name, idx) => {
       const pos = getPosition("own", name);
       if (!pos.inBoard) {
-        ownBench.appendChild(createPiece({ team: "own", key: name, number: idx + 1, name, onBoard: false }));
         ownWaiting += 1;
+        if (!isPieceBeingDragged("own", name)) {
+          ownBench.appendChild(createPiece({ team: "own", key: name, number: idx + 1, name, onBoard: false }));
+        }
       }
     });
 
@@ -698,8 +713,10 @@
       const key = getEnemyKey(i);
       const pos = getPosition("enemy", key);
       if (!pos.inBoard) {
-        enemyBench.appendChild(createPiece({ team: "enemy", key, number: i, name: "", onBoard: false }));
         enemyWaiting += 1;
+        if (!isPieceBeingDragged("enemy", key)) {
+          enemyBench.appendChild(createPiece({ team: "enemy", key, number: i, name: "", onBoard: false }));
+        }
       }
     }
     if (enemyWaiting === 0) {
@@ -712,7 +729,7 @@
 
     state.selected.forEach((name, idx) => {
       const pos = getPosition("own", name);
-      if (pos.inBoard) {
+      if (pos.inBoard && !isPieceBeingDragged("own", name)) {
         const piece = createPiece({ team: "own", key: name, number: idx + 1, name, onBoard: true });
         piece.style.left = `${pos.x}%`;
         piece.style.top = `${pos.y}%`;
@@ -723,7 +740,7 @@
     for (let i = 1; i <= MAX_PLAYERS; i += 1) {
       const key = getEnemyKey(i);
       const pos = getPosition("enemy", key);
-      if (pos.inBoard) {
+      if (pos.inBoard && !isPieceBeingDragged("enemy", key)) {
         const piece = createPiece({ team: "enemy", key, number: i, name: "", onBoard: true });
         piece.style.left = `${pos.x}%`;
         piece.style.top = `${pos.y}%`;
@@ -732,7 +749,7 @@
     }
 
     const ballPos = getPosition("ball", BALL_KEY);
-    if (ballPos.inBoard) {
+    if (ballPos.inBoard && !isPieceBeingDragged("ball", BALL_KEY)) {
       const ball = createBallPiece();
       ball.style.left = `${ballPos.x}%`;
       ball.style.top = `${ballPos.y}%`;
@@ -769,18 +786,49 @@
     setTimeout(() => line.remove(), 1000);
   }
 
+  function attachDragListeners() {
+    if (dragListenersAttached) return;
+    document.addEventListener("pointermove", onPointerMove, { passive: false });
+    document.addEventListener("pointerup", onPointerUp, { passive: false });
+    document.addEventListener("pointercancel", onPointerCancel, { passive: false });
+    dragListenersAttached = true;
+  }
+
+  function detachDragListenersIfIdle() {
+    if (activeDrags.size > 0 || !dragListenersAttached) return;
+    document.removeEventListener("pointermove", onPointerMove);
+    document.removeEventListener("pointerup", onPointerUp);
+    document.removeEventListener("pointercancel", onPointerCancel);
+    dragListenersAttached = false;
+  }
+
   function onPointerDown(event) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
+
     const piece = event.currentTarget;
+    const team = piece.dataset.team;
+    const key = piece.dataset.key;
+    const identity = getDragIdentity(team, key);
+
+    if (activeDrags.has(event.pointerId) || isPieceBeingDragged(team, key)) return;
+    if (activeDrags.size >= MAX_SIMULTANEOUS_DRAGS) {
+      showToast("말판은 최대 3개까지 동시에 이동할 수 있어요.");
+      return;
+    }
+
     const rect = piece.getBoundingClientRect();
     const disc = piece.querySelector(".disc") || piece;
     const discRect = disc.getBoundingClientRect();
     event.preventDefault();
 
-    drag = {
+    try { piece.setPointerCapture(event.pointerId); }
+    catch (err) { /* 일부 브라우저에서는 포인터 캡처를 지원하지 않습니다. */ }
+
+    const dragItem = {
       el: piece,
-      team: piece.dataset.team,
-      key: piece.dataset.key,
+      team,
+      key,
+      identity,
       pointerId: event.pointerId,
       offsetX: event.clientX - rect.left,
       offsetY: event.clientY - rect.top,
@@ -789,64 +837,68 @@
       lastPoint: null
     };
 
+    activeDrags.set(event.pointerId, dragItem);
     piece.classList.add("dragging");
     piece.style.left = `${rect.left}px`;
     piece.style.top = `${rect.top}px`;
     piece.style.width = `${rect.width}px`;
     piece.style.height = `${rect.height}px`;
+    piece.style.margin = "0";
     document.body.appendChild(piece);
 
-    document.addEventListener("pointermove", onPointerMove, { passive: false });
-    document.addEventListener("pointerup", onPointerUp, { passive: false });
-    document.addEventListener("pointercancel", onPointerCancel, { passive: false });
+    attachDragListeners();
   }
 
-  function moveDraggedPiece(clientX, clientY) {
-    const left = clientX - drag.offsetX;
-    const top = clientY - drag.offsetY;
-    drag.el.style.left = `${left}px`;
-    drag.el.style.top = `${top}px`;
-    return { centerX: left + drag.discOffsetX, centerY: top + drag.discOffsetY };
+  function moveDraggedPiece(dragItem, clientX, clientY) {
+    const left = clientX - dragItem.offsetX;
+    const top = clientY - dragItem.offsetY;
+    dragItem.el.style.left = `${left}px`;
+    dragItem.el.style.top = `${top}px`;
+    return { centerX: left + dragItem.discOffsetX, centerY: top + dragItem.discOffsetY };
   }
 
   function onPointerMove(event) {
-    if (!drag || event.pointerId !== drag.pointerId) return;
+    const dragItem = activeDrags.get(event.pointerId);
+    if (!dragItem) return;
     event.preventDefault();
-    const center = moveDraggedPiece(event.clientX, event.clientY);
+
+    const center = moveDraggedPiece(dragItem, event.clientX, event.clientY);
     const point = boardPointFromClient(center.centerX, center.centerY);
     if (point) {
-      addTrailSegment(drag.lastPoint, point, drag.team);
-      drag.lastPoint = point;
+      addTrailSegment(dragItem.lastPoint, point, dragItem.team);
+      dragItem.lastPoint = point;
     } else {
-      drag.lastPoint = null;
+      dragItem.lastPoint = null;
     }
   }
 
   function finishDrag(event, cancelled = false) {
-    if (!drag || event.pointerId !== drag.pointerId) return;
+    const dragItem = activeDrags.get(event.pointerId);
+    if (!dragItem) return;
     event.preventDefault();
 
-    const center = moveDraggedPiece(event.clientX, event.clientY);
+    const center = moveDraggedPiece(dragItem, event.clientX, event.clientY);
     const point = !cancelled ? boardPointFromClient(center.centerX, center.centerY) : null;
 
     if (point) {
-      setPosition(drag.team, drag.key, {
+      setPosition(dragItem.team, dragItem.key, {
         inBoard: true,
         x: Number(clamp(point.x, 2.2, 97.8).toFixed(3)),
         y: Number(clamp(point.y, 3.2, 96.8).toFixed(3))
       });
-    } else if (drag.team !== "ball") {
-      setPosition(drag.team, drag.key, { inBoard: false });
+    } else if (dragItem.team !== "ball") {
+      setPosition(dragItem.team, dragItem.key, { inBoard: false });
     }
 
-    document.removeEventListener("pointermove", onPointerMove);
-    document.removeEventListener("pointerup", onPointerUp);
-    document.removeEventListener("pointercancel", onPointerCancel);
+    activeDrags.delete(event.pointerId);
+    lastDragEndAt = Date.now();
 
-    const oldEl = drag.el;
-    drag = null;
-    oldEl.remove();
+    try { dragItem.el.releasePointerCapture(event.pointerId); }
+    catch (err) { /* 일부 브라우저에서는 포인터 캡처를 지원하지 않습니다. */ }
+
+    dragItem.el.remove();
     renderAll();
+    detachDragListenersIfIdle();
   }
 
   function onPointerUp(event) { finishDrag(event, false); }
@@ -954,6 +1006,10 @@
   court.addEventListener("dblclick", togglePanel);
   court.addEventListener("touchend", () => {
     const now = Date.now();
+    if (activeDrags.size > 0 || now - lastDragEndAt < 450) {
+      lastTwoFingerTap = 0;
+      return;
+    }
     if (now - lastTwoFingerTap < 320) {
       togglePanel();
       lastTwoFingerTap = 0;
